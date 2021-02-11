@@ -10,6 +10,10 @@ pkg_check_modules(WPE wpe-1.0 REQUIRED)
 
 find_package(GLIB 2.40.0 REQUIRED COMPONENTS gio gobject gthread gmodule)
 
+set(WPE_ANDROID_PUBLIC_HDRS
+    "include/wpe-android/view-backend-exportable.h"
+)
+
 set(WPE_ANDROID_INCLUDE_DIRECTORIES
     ${GLIB_INCLUDE_DIRS}
     ${WPE_INCLUDE_DIRS}
@@ -35,3 +39,8 @@ set(WPE_ANDROID_SOURCES
 add_library(WPEBackend-android SHARED ${WPE_ANDROID_SOURCES})
 target_include_directories(WPEBackend-android PRIVATE ${WPE_ANDROID_INCLUDE_DIRECTORIES})
 target_link_libraries(WPEBackend-android ${WPE_ANDROID_LIBRARIES})
+
+install(TARGETS WPEBackend-android
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES ${WPE_ANDROID_PUBLIC_HDRS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}) 
