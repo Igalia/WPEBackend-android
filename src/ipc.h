@@ -57,6 +57,7 @@ public:
     void initialize(Handler&);
     void deinitialize();
 
+    int socketFd();
     int releaseClientFD();
 
     void sendMessage(char*, size_t);
@@ -82,6 +83,8 @@ public:
 
     void initialize(Handler&, int);
     void deinitialize();
+
+    int socketFd();
 
     void sendMessage(char*, size_t);
 
