@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 namespace IPC {
 
@@ -77,9 +78,14 @@ int Host::socketFd()
     return -1;
 }
 
-int Host::releaseClientFD()
+int Host::releaseClientFD(bool closeSourceFd)
 {
-    return dup(m_clientFd);
+    int fd = dup(m_clientFd);
+    if (closeSourceFd && m_clientFd != -1) {
+        close(m_clientFd);
+        m_clientFd = -1;
+    }
+    return fd;
 }
 
 void Host::sendMessage(char* data, size_t size)
@@ -164,6 +170,19 @@ gboolean Client::socketCallback(GSocket* socket, GIOCondition condition, gpointe
 void Client::sendMessage(char* data, size_t size)
 {
     g_socket_send(m_socket, data, size, nullptr, nullptr);
+}
+
+void Client::sendReceiveMessage(char* data, size_t size, std::function<void(char*, size_t)> handler)
+{
+    g_socket_send(m_socket, data, size, nullptr, nullptr);
+
+    char* buffer = g_new0(char, Message::size);
+    gssize len = g_socket_receive_with_blocking(m_socket, buffer, Message::size, TRUE, nullptr, nullptr);
+
+    if (len == Message::size)
+        handler(buffer, Message::size);
+
+    g_free(buffer);
 }
 
 } // namespace IPC

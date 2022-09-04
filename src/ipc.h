@@ -27,6 +27,7 @@
 #ifndef wpe_mesa_ipc_h
 #define wpe_mesa_ipc_h
 
+#include <functional>
 #include <gio/gio.h>
 #include <memory>
 #include <stdint.h>
@@ -58,7 +59,7 @@ public:
     void deinitialize();
 
     int socketFd();
-    int releaseClientFD();
+    int releaseClientFD(bool closeSourceFd = false);
 
     void sendMessage(char*, size_t);
 
@@ -87,6 +88,7 @@ public:
     int socketFd();
 
     void sendMessage(char*, size_t);
+    void sendReceiveMessage(char*, size_t, std::function<void(char*, size_t)> handler);
 
 private:
     static gboolean socketCallback(GSocket*, GIOCondition, gpointer);
