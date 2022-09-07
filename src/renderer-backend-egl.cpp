@@ -10,7 +10,9 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <android/hardware_buffer.h>
+#include <cstdint>
 #include <errno.h>
+#include <unordered_map>
 
 struct Buffer {
     uint32_t bufferID { 0 };
@@ -27,12 +29,34 @@ struct Buffer {
     } gl;
 };
 
+class EGLTarget;
+
+class RendererBackend final : public IPC::Client::Handler {
+public:
+    RendererBackend(int fd);
+    ~RendererBackend();
+
+    IPC::Client& ipc() { return m_ipcClient; }
+
+    void registerEGLTarget(uint32_t poolId, EGLTarget*);
+
+private:
+
+    // IPC::Client::Handle
+    void handleMessage(char*, size_t) override;
+
+    IPC::Client m_ipcClient;
+
+    // (poolId -> EGLTarget)
+    std::unordered_map<uint32_t, EGLTarget*> m_targetMap;
+};
+
 class EGLTarget : public IPC::Client::Handler {
 public:
     EGLTarget(struct wpe_renderer_backend_egl_target*, int);
     virtual ~EGLTarget();
 
-    void initialize(uint32_t width, uint32_t height);
+    void initialize(RendererBackend* backend, uint32_t width, uint32_t height);
     void resize(uint32_t width, uint32_t height);
 
     void frameWillRender();
@@ -46,6 +70,8 @@ public:
     void handleMessage(char*, size_t) override;
 
     struct wpe_renderer_backend_egl_target* target;
+
+    RendererBackend* m_backend { nullptr };
 
     IPC::Client ipcClient;
 
@@ -91,6 +117,51 @@ static void destroyBufferPool(std::array<Buffer, 4>& pool, PFNEGLDESTROYIMAGEKHR
     }
 }
 
+RendererBackend::RendererBackend(int fd) {
+    m_ipcClient.initialize(*this, fd);
+}
+
+RendererBackend::~RendererBackend() {
+    m_ipcClient.deinitialize();
+}
+
+void RendererBackend::registerEGLTarget(uint32_t poolId, EGLTarget* target) {
+    m_targetMap.insert({poolId, target});
+}
+
+void RendererBackend::handleMessage(char* data, size_t size) {
+    if (size != IPC::Message::size)
+        return;
+
+    auto& message = IPC::Message::cast(data);
+    switch (message.messageCode) {
+    case IPC::FrameComplete::code:
+    {
+        auto frameComplete = IPC::FrameComplete::from(message);
+        auto it = m_targetMap.find(frameComplete.poolID);
+        if (it == m_targetMap.end())
+            g_error("RendererBackend - Cannot find buffer pool with poolId %" PRIu32 " in renderer backend.", frameComplete.poolID);
+
+        wpe_renderer_backend_egl_target_dispatch_frame_complete(it->second->target);
+        break;
+    }
+    case IPC::ReleaseBuffer::code:
+    {
+        auto release = IPC::ReleaseBuffer::from(message);
+        ALOGV("EGLTarget::handleMessage(): BufferRelease { poolID %u, bufferID %u }", release.poolID, release.bufferID);
+        auto it = m_targetMap.find(release.poolID);
+        if (it == m_targetMap.end())
+            g_error("RendererBackend - Cannot find buffer pool with poolId %" PRIu32 " in renderer backend.", release.poolID);
+
+        it->second->releaseBuffer(release.poolID, release.bufferID);
+        break;
+    }
+    default:
+        ALOGV("EGLTarget: invalid message");
+        break;
+    }
+}
+
 EGLTarget::EGLTarget(struct wpe_renderer_backend_egl_target* target, int hostFd)
     : target(target)
 {
@@ -98,27 +169,59 @@ EGLTarget::EGLTarget(struct wpe_renderer_backend_egl_target* target, int hostFd)
 
     for (auto& buffer : buffers.pool)
         buffer.bufferID = uint32_t(std::distance(buffers.pool.begin(), &buffer));
-
-    {
-        IPC::PoolConstruction poolConstruction;
-        poolConstruction.poolID = 0;
-
-        IPC::Message message;
-        IPC::PoolConstruction::construct(message, poolConstruction);
-        ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
-    }
 }
 
 EGLTarget::~EGLTarget()
 {
+    IPC::UnregisterPool unregisterPool;
+    unregisterPool.poolID = buffers.poolID;
+
+    IPC::Message message;
+    IPC::UnregisterPool::construct(message, unregisterPool);
+    ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
+
     ipcClient.deinitialize();
 }
 
-void EGLTarget::initialize(uint32_t width, uint32_t height)
+void EGLTarget::initialize(RendererBackend* backend, uint32_t width, uint32_t height)
 {
     ALOGV("EGLTarget::initialize() (%u,%u)", width, height);
+    m_backend = backend;
     renderer.width = width;
     renderer.height = height;
+
+    IPC::PoolConstruction poolConstruction;
+
+    IPC::Message message;
+    IPC::PoolConstruction::construct(message, poolConstruction);
+
+    // We can safely assume that returned message is PoolConstructionReply because there are no
+    // other messages coming this way in this socket at this point
+    backend->ipc().sendReceiveMessage(IPC::Message::data(message), IPC::Message::size, [&] (char* data, size_t size) {
+        ALOGV("EGLTarget::initialize - handleMessage() %p[%zu]", data, size);
+        if (size != IPC::Message::size)
+            return;
+
+        auto& message = IPC::Message::cast(data);
+        switch (message.messageCode) {
+            case IPC::PoolConstructionReply::code:
+            {
+                auto reply = IPC::PoolConstructionReply::from(message);
+                ALOGV("  PoolConstructionReply: poolID %u", reply.poolID);
+
+                buffers.poolID = reply.poolID;
+
+                m_backend->registerEGLTarget(buffers.poolID, this);
+
+                IPC::RegisterPool registerPool;
+                registerPool.poolID = reply.poolID;
+
+                IPC::Message message;
+                IPC::RegisterPool::construct(message, registerPool);
+                ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
+            }
+        }
+    });
 }
 
 void EGLTarget::resize(uint32_t width, uint32_t height)
@@ -131,15 +234,12 @@ void EGLTarget::resize(uint32_t width, uint32_t height)
 
     destroyBufferPool(buffers.pool, renderer.destroyImageKHR);
 
-    ++buffers.poolID;
-    {
-        IPC::PoolConstruction poolConstruction;
-        poolConstruction.poolID = buffers.poolID;
+    IPC::PoolPurge poolPurge;
+    poolPurge.poolID = buffers.poolID;
 
-        IPC::Message message;
-        IPC::PoolConstruction::construct(message, poolConstruction);
-        ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
-    }
+    IPC::Message message;
+    IPC::PoolPurge::construct(message, poolPurge);
+    ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
 }
 
 void EGLTarget::frameWillRender()
@@ -227,10 +327,10 @@ void EGLTarget::frameWillRender()
 
             IPC::Message message;
             IPC::BufferAllocation::construct(message, allocation);
-            ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
+            m_backend->ipc().sendMessage(IPC::Message::data(message), IPC::Message::size);
 
             while (true) {
-                int ret = AHardwareBuffer_sendHandleToUnixSocket(current.object, ipcClient.socketFd());
+                int ret = AHardwareBuffer_sendHandleToUnixSocket(current.object, m_backend->ipc().socketFd());
                 if (!ret || ret != -EAGAIN)
                     break;
             }
@@ -261,7 +361,7 @@ void EGLTarget::frameRendered()
 
         IPC::Message message;
         IPC::BufferCommit::construct(message, commit);
-        ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
+        m_backend->ipc().sendMessage(IPC::Message::data(message), IPC::Message::size);
     }
 
     buffers.current->locked = true;
@@ -299,51 +399,33 @@ void EGLTarget::releaseBuffer(uint32_t poolID, uint32_t bufferID)
 
 void EGLTarget::handleMessage(char* data, size_t size)
 {
-    if (size != IPC::Message::size)
-        return;
-
-    auto& message = IPC::Message::cast(data);
-    switch (message.messageCode) {
-    case IPC::FrameComplete::code:
-    {
-        wpe_renderer_backend_egl_target_dispatch_frame_complete(target);
-        break;
-    }
-    case IPC::ReleaseBuffer::code:
-    {
-        auto release = IPC::ReleaseBuffer::from(message);
-        ALOGV("EGLTarget::handleMessage(): BufferRelease { poolID %u, bufferID %u }", release.poolID, release.bufferID);
-        releaseBuffer(release.poolID, release.bufferID);
-        break;
-    }
-    default:
-        ALOGV("EGLTarget: invalid message");
-        break;
-    }
+    // TODO:
 }
 
 struct wpe_renderer_backend_egl_interface android_renderer_backend_egl_impl = {
     // create
-    [] (int) -> void*
+    [] (int host_fd) -> void*
     {
-        ALOGV("noop_renderer_backend_egl_impl::create()");
-        return nullptr;
+        ALOGV("android_renderer_backend_egl_impl::create()");
+        return new RendererBackend(host_fd);
     },
     // destroy
-    [] (void*)
+    [] (void* data)
     {
-        ALOGV("noop_renderer_backend_egl_impl::destroy()");
+        ALOGV("android_renderer_backend_egl_impl::destroy()");
+        auto* backend = static_cast<RendererBackend*>(data);
+        delete backend;
     },
     // get_native_display
     [] (void*) -> EGLNativeDisplayType
     {
-        ALOGV("noop_renderer_backend_egl_impl::get_native_display()");
+        ALOGV("android_renderer_backend_egl_impl::get_native_display()");
         return EGL_DEFAULT_DISPLAY;
     },
     // get_platform
     [] (void*) -> uint32_t
     {
-        ALOGV("noop_renderer_backend_egl_impl::get_platform()");
+        ALOGV("android_renderer_backend_egl_impl::get_platform()");
         return EGL_PLATFORM_SURFACELESS_MESA;
     },
 };
@@ -352,50 +434,51 @@ struct wpe_renderer_backend_egl_target_interface android_renderer_backend_egl_ta
     // create
     [] (struct wpe_renderer_backend_egl_target* target, int hostFd) -> void*
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::create() fd %d", hostFd);
+        ALOGV("android_renderer_backend_egl_target_impl::create() fd %d", hostFd);
         return new EGLTarget(target, hostFd);
     },
     // destroy
     [] (void* data)
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::destroy()");
+        ALOGV("android_renderer_backend_egl_target_impl::destroy()");
         auto* target = static_cast<EGLTarget*>(data);
         delete target;
     },
     // initialize
-    [] (void* data, void*, uint32_t width, uint32_t height)
+    [](void* data, void* backend_data, uint32_t width, uint32_t height)
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::initialize() (%u,%u)", width, height);
-        static_cast<EGLTarget*>(data)->initialize(width, height);
+        auto* target = static_cast<EGLTarget*>(data);
+        auto* backend = static_cast<RendererBackend*>(backend_data);
+        target->initialize(backend, width, height);
     },
     // get_native_window
     [] (void*) -> EGLNativeWindowType
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::get_native_window()");
+        ALOGV("android_renderer_backend_egl_target_impl::get_native_window()");
         return nullptr;
     },
     // resize
     [] (void* data, uint32_t width, uint32_t height)
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::resize() (%u,%u)", width, height);
+        ALOGV("android_renderer_backend_egl_target_impl::resize() (%u,%u)", width, height);
         static_cast<EGLTarget*>(data)->resize(width, height);
     },
     // frame_will_render
     [] (void* data)
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::frame_will_render()");
+        ALOGV("android_renderer_backend_egl_target_impl::frame_will_render()");
         static_cast<EGLTarget*>(data)->frameWillRender();
     },
     // frame_rendered
     [] (void* data)
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::frame_rendered()");
+        ALOGV("android_renderer_backend_egl_target_impl::frame_rendered()");
         static_cast<EGLTarget*>(data)->frameRendered();
     },
     // deinitialize
     [] (void* data)
     {
-        ALOGV("noop_renderer_backend_egl_target_impl::deinitialize()");
+        ALOGV("android_renderer_backend_egl_target_impl::deinitialize()");
         static_cast<EGLTarget*>(data)->deinitialize();
     },
 };
