@@ -2,6 +2,7 @@
 
 #include <android/hardware_buffer.h>
 #include <wpe-android/view-backend-exportable.h>
+#include <vector>
 
 #include "ipc.h"
 
@@ -33,6 +34,10 @@ public:
     void releaseBuffer(AHardwareBuffer*, uint32_t, uint32_t);
 
 private:
+
+    void registerPool(uint32_t poolId);
+    void unregisterPool(uint32_t poolId);
+
     // IPC::Host::Handler
     void handleMessage(char*, size_t) override;
 
@@ -40,6 +45,8 @@ private:
     struct wpe_view_backend* m_backend;
 
     IPC::Host m_ipcHost;
+
+    std::vector<uint32_t> m_poolIds;
 };
 
 } // namespace Exportable
