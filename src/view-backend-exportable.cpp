@@ -4,6 +4,7 @@
 #include "ipc-android.h"
 #include "logging.h"
 
+#include <algorithm>
 #include <errno.h>
 
 namespace Exportable {
@@ -18,6 +19,9 @@ ViewBackend::ViewBackend(ClientBundle* clientBundle, struct wpe_view_backend* ba
 
 ViewBackend::~ViewBackend()
 {
+    while (!m_poolIds.empty())
+        unregisterPool(m_poolIds.front());
+
     m_ipcHost.deinitialize();
     m_clientBundle->viewBackend = nullptr;
     m_backend = nullptr;
@@ -42,6 +46,22 @@ void ViewBackend::releaseBuffer(AHardwareBuffer* buffer, uint32_t poolID, uint32
     RendererHost::instance().releaseBuffer(buffer, poolID, bufferID);
 }
 
+void ViewBackend::registerPool(uint32_t poolId)
+{
+    m_poolIds.push_back(poolId);
+    RendererHost::instance().registerViewBackend(poolId, this);
+}
+
+void ViewBackend::unregisterPool(uint32_t poolId)
+{
+     auto it = std::find(m_poolIds.begin(), m_poolIds.end(), poolId);
+    if (it == m_poolIds.end())
+        return;
+
+    m_poolIds.erase(it);
+    RendererHost::instance().unregisterViewBackend(poolId);
+}
+
 void ViewBackend::handleMessage(char* data, size_t size)
 {
     ALOGV("RendererHostClientProxy::handleMessage() %p[%zu]", data, size);
@@ -52,14 +72,14 @@ void ViewBackend::handleMessage(char* data, size_t size)
     switch (message.messageCode) {
     case IPC::RegisterPool::code:
     {
-        auto registerPool = IPC::RegisterPool::from(message);
-        RendererHost::instance().registerViewBackend(registerPool.poolID, this);
+        auto registerPoolMsg = IPC::RegisterPool::from(message);
+        registerPool(registerPoolMsg.poolID);
         break;
     }
     case IPC::UnregisterPool::code:
     {
-        auto unregisterPool = IPC::UnregisterPool::from(message);
-        RendererHost::instance().unregisterViewBackend(unregisterPool.poolID);
+        auto unregisterPoolMsg = IPC::UnregisterPool::from(message);
+        unregisterPool(unregisterPoolMsg.poolID);
         break;
     }
     default:
@@ -81,19 +101,21 @@ struct wpe_view_backend_interface android_view_backend_exportable_impl = {
     // create
     [] (void* data, struct wpe_view_backend* backend) -> void*
     {
+        ALOGV("android_view_backend_exportable_impl::create()");
         auto* clientBundle = static_cast<Exportable::ClientBundle*>(data);
         return new Exportable::ViewBackend(clientBundle, backend);
     },
     // destroy
     [] (void* data)
     {
+        ALOGV("android_view_backend_exportable_impl::destroy()");
         auto* backend = static_cast<Exportable::ViewBackend*>(data);
         delete backend;
     },
     // initialize
     [] (void* data)
     {
-        ALOGV("noop_view_backend_impl::initialize()");
+        ALOGV("android_view_backend_exportable_impl::initialize()");
         auto& backend = *static_cast<Exportable::ViewBackend*>(data);
         backend.initialize();
     },

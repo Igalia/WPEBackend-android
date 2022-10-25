@@ -91,8 +91,10 @@ void RendererHost::unregisterViewBackend(uint32_t poolId) {
 
 Exportable::ViewBackend* RendererHost::findViewBackend(uint32_t poolId) {
     auto it = m_viewBackendMap.find(poolId);
-    if (it == m_viewBackendMap.end())
-        g_error("RendererHost::findViewBackend(): " "Cannot find view backend with poolId %" PRIu32 " in render host.", poolId);
+    if (it == m_viewBackendMap.end()) {
+        g_info("RendererHost::findViewBackend(): " "Cannot find view backend with poolId %" PRIu32 " in render host.", poolId);
+        return nullptr;
+    }
     return it->second;
 }
 
@@ -187,9 +189,21 @@ void RendererHostClientProxy::bufferCommit(uint32_t poolID, uint32_t bufferID)
     m_lastExportedPoolID = poolID;
 
     auto* viewBackend = m_host.findViewBackend(poolID);
-    auto* clientBundle = viewBackend->clientBundle();
-    if (clientBundle->client && clientBundle->client->export_buffer)
-        clientBundle->client->export_buffer(clientBundle->data, buffer, poolID, bufferID);
+    if (viewBackend) {
+        auto* clientBundle = viewBackend->clientBundle();
+        if (clientBundle->client && clientBundle->client->export_buffer)
+            clientBundle->client->export_buffer(clientBundle->data, buffer, poolID, bufferID);
+    } else {
+        // In some cases viewbackend might have been already destroyed when buffer commit message
+        // is dispatched from ipc queue. It means that webview is already destroyed or being destroyed
+        // and all IPC is being torn down.
+        //
+        // In such case all we can do is to release the buffer
+        if (buffer) {
+            AHardwareBuffer_release(buffer);
+            bufferPool->setBuffer(bufferID, nullptr);
+        }
+    }
 }
 
 void RendererHostClientProxy::handleMessage(char*data, size_t size) {
