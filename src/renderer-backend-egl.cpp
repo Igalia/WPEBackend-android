@@ -39,6 +39,7 @@ public:
     IPC::Client& ipc() { return m_ipcClient; }
 
     void registerEGLTarget(uint32_t poolId, EGLTarget*);
+    void unregisterEGLTarget(uint32_t poolId);
 
 private:
 
@@ -129,6 +130,13 @@ void RendererBackend::registerEGLTarget(uint32_t poolId, EGLTarget* target) {
     m_targetMap.insert({poolId, target});
 }
 
+void RendererBackend::unregisterEGLTarget(uint32_t poolId) {
+    auto it = m_targetMap.find(poolId);
+    if (it != m_targetMap.end()) {
+        m_targetMap.erase(it);
+    }
+}
+
 void RendererBackend::handleMessage(char* data, size_t size) {
     if (size != IPC::Message::size)
         return;
@@ -136,11 +144,15 @@ void RendererBackend::handleMessage(char* data, size_t size) {
     auto& message = IPC::Message::cast(data);
     switch (message.messageCode) {
     case IPC::FrameComplete::code:
-    {
-        auto frameComplete = IPC::FrameComplete::from(message);
+    {   auto frameComplete = IPC::FrameComplete::from(message);
+        ALOGV("RendererBackend::handleMessage(): FrameComplete { poolID %u }", frameComplete.poolID);
         auto it = m_targetMap.find(frameComplete.poolID);
-        if (it == m_targetMap.end())
-            g_error("RendererBackend - Cannot find buffer pool with poolId %" PRIu32 " in renderer backend.", frameComplete.poolID);
+        if (it == m_targetMap.end()) {
+            // This situation can happen if during intensive rendering page is destroyed while frame is still
+            // being processed by UIProcess. This used to be g_error but we must not crash in such situation.
+            g_warning("RendererBackend - Cannot find buffer pool with poolId %" PRIu32 " in renderer backend.", frameComplete.poolID);
+            return;
+        }
 
         wpe_renderer_backend_egl_target_dispatch_frame_complete(it->second->target);
         break;
@@ -148,16 +160,20 @@ void RendererBackend::handleMessage(char* data, size_t size) {
     case IPC::ReleaseBuffer::code:
     {
         auto release = IPC::ReleaseBuffer::from(message);
-        ALOGV("EGLTarget::handleMessage(): BufferRelease { poolID %u, bufferID %u }", release.poolID, release.bufferID);
+        ALOGV("RendererBackend::handleMessage(): BufferRelease { poolID %u, bufferID %u }", release.poolID, release.bufferID);
         auto it = m_targetMap.find(release.poolID);
-        if (it == m_targetMap.end())
-            g_error("RendererBackend - Cannot find buffer pool with poolId %" PRIu32 " in renderer backend.", release.poolID);
+        if (it == m_targetMap.end()) {
+            // This situation can happen if during intensive rendering page is destroyed while frame is still
+            // being processed by UIProcess. This used to be g_error but we must not crash in such situation.
+            g_warning("RendererBackend - Cannot find buffer pool with poolId %" PRIu32 " in renderer backend.", release.poolID);
+            return;
+        }
 
         it->second->releaseBuffer(release.poolID, release.bufferID);
         break;
     }
     default:
-        ALOGV("EGLTarget: invalid message");
+        ALOGV("RendererBackend: invalid message");
         break;
     }
 }
@@ -181,6 +197,12 @@ EGLTarget::~EGLTarget()
     ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
 
     ipcClient.deinitialize();
+
+    m_backend->unregisterEGLTarget(buffers.poolID);
+    for (auto& buffer : buffers.pool) {
+        if (buffer.object)
+            AHardwareBuffer_release(buffer.object);
+    }
 }
 
 void EGLTarget::initialize(RendererBackend* backend, uint32_t width, uint32_t height)
@@ -228,7 +250,7 @@ void EGLTarget::resize(uint32_t width, uint32_t height)
 {
     if (renderer.width == width && renderer.height == height)
         return;
-
+    ALOGV("EGLTarget::resize() (%u,%u)", width, height);
     renderer.width = width;
     renderer.height = height;
 
@@ -370,6 +392,7 @@ void EGLTarget::frameRendered()
 
 void EGLTarget::deinitialize()
 {
+    ALOGV("EGLTarget::deinitialize()");
     destroyBufferPool(buffers.pool, renderer.destroyImageKHR);
 
     if (renderer.framebuffer)

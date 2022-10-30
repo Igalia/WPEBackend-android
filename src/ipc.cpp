@@ -129,16 +129,19 @@ void Client::initialize(Handler& handler, int fd)
         return;
 
     m_source = g_socket_create_source(m_socket, G_IO_IN, nullptr);
+    g_source_set_name(m_source, "WPEBackend-android::socket");
     g_source_set_callback(m_source, reinterpret_cast<GSourceFunc>(socketCallback), this, nullptr);
     g_source_attach(m_source, g_main_context_get_thread_default());
 }
 
 void Client::deinitialize()
 {
-    if (m_source)
+    if (m_source) {
         g_source_destroy(m_source);
-    if (m_socket)
-        g_object_unref(m_socket);
+        g_object_unref(m_source);
+    }
+
+    g_clear_object(&m_socket);
 
     m_handler = nullptr;
 }
@@ -155,13 +158,19 @@ gboolean Client::socketCallback(GSocket* socket, GIOCondition condition, gpointe
     if (!(condition & G_IO_IN))
         return TRUE;
 
-    auto& client = *reinterpret_cast<Client*>(data);
-
+    GError* error = nullptr;
     char* buffer = g_new0(char, Message::size);
-    gssize len = g_socket_receive(socket, buffer, Message::size, nullptr, nullptr);
+    gssize len = g_socket_receive(socket, buffer, Message::size, nullptr, &error);
+    if (len == -1) {
+        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED))
+            g_warning("Failed to read message from socket: %s", error->message);
+        g_error_free(error);
+        return FALSE;
+    }
 
-    if (len == Message::size)
-        client.m_handler->handleMessage(buffer, Message::size);
+    auto client = reinterpret_cast<Client*>(data);
+    if (len == Message::size && client->m_handler)
+        client->m_handler->handleMessage(buffer, Message::size);
 
     g_free(buffer);
     return TRUE;
