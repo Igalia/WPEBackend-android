@@ -54,6 +54,7 @@ void ViewBackend::registerPool(uint32_t poolId)
 
 void ViewBackend::unregisterPool(uint32_t poolId)
 {
+    ALOGV("ViewBackend::unregisterPool() %d", poolId);
      auto it = std::find(m_poolIds.begin(), m_poolIds.end(), poolId);
     if (it == m_poolIds.end())
         return;
@@ -64,7 +65,7 @@ void ViewBackend::unregisterPool(uint32_t poolId)
 
 void ViewBackend::handleMessage(char* data, size_t size)
 {
-    ALOGV("RendererHostClientProxy::handleMessage() %p[%zu]", data, size);
+    ALOGV("ViewBackend::handleMessage() %p[%zu]", data, size);
     if (size != IPC::Message::size)
         return;
 
@@ -111,6 +112,7 @@ struct wpe_view_backend_interface android_view_backend_exportable_impl = {
         ALOGV("android_view_backend_exportable_impl::destroy()");
         auto* backend = static_cast<Exportable::ViewBackend*>(data);
         delete backend;
+        ALOGV("android_view_backend_exportable_impl::destroy() - done");
     },
     // initialize
     [] (void* data)
@@ -145,6 +147,7 @@ __attribute__((visibility("default")))
 void
 wpe_android_view_backend_exportable_destroy(struct wpe_android_view_backend_exportable* exportable)
 {
+    ALOGV("wpe_android_view_backend_exportable_destroy");
     wpe_view_backend_destroy(exportable->backend);
     delete exportable->clientBundle;
     delete exportable;
