@@ -55,7 +55,7 @@ RendererHost& RendererHost::instance() {
 
 // There's one client created per webprocess
 int RendererHost::createClient() {
-    ALOGV("RendererHost::createClient()");
+    ALOGD("RendererHost::createClient()");
 
     auto* clientProxy = new RendererHostClientProxy(*this);
     m_clients.push_back(clientProxy);
@@ -63,7 +63,7 @@ int RendererHost::createClient() {
 }
 
 uint32_t RendererHost::createBufferPool(RendererHostClientProxy* client) {
-    ALOGV("RendererHost::createBufferPool()");
+    ALOGD("RendererHost::createBufferPool()");
     static uint32_t poolID = 0;
 
     auto* bufferPool = new BufferPool(poolID++, client);
@@ -73,8 +73,10 @@ uint32_t RendererHost::createBufferPool(RendererHostClientProxy* client) {
 
 BufferPool* RendererHost::findBufferPool(uint32_t poolID) {
     auto it = m_bufferPoolMap.find(poolID);
-    if (it == m_bufferPoolMap.end())
-        g_error("RendererHost::findBufferPool(): " "Cannot find buffer pool with poolId %" PRIu32 " in render host.", poolID);
+    if (it == m_bufferPoolMap.end()) {
+        ALOGW("RendererHost::findBufferPool(): " "Cannot find buffer pool with poolId %" PRIu32 " in render host.", poolID);
+        return nullptr;
+    }
     return it->second;
 }
 
@@ -92,7 +94,7 @@ void RendererHost::unregisterViewBackend(uint32_t poolId) {
 Exportable::ViewBackend* RendererHost::findViewBackend(uint32_t poolId) {
     auto it = m_viewBackendMap.find(poolId);
     if (it == m_viewBackendMap.end()) {
-        g_info("RendererHost::findViewBackend(): " "Cannot find view backend with poolId %" PRIu32 " in render host.", poolId);
+        ALOGW("RendererHost::findViewBackend(): " "Cannot find view backend with poolId %" PRIu32 " in render host.", poolId);
         return nullptr;
     }
     return it->second;
@@ -260,7 +262,7 @@ void RendererHostClientProxy::handleMessage(char*data, size_t size) {
 struct wpe_renderer_host_interface android_renderer_host_impl = {
     // create
     [] () -> void* {
-        ALOGV("wpe_renderer_host_interface - create");
+        ALOGD("wpe_renderer_host_interface - create");
         // libwpe stores value returned by this call as static singleton without any other usage.
         // This is called once prior to wpe_renderer_host_create_client calls.
         // Renderer host can be considered as singleton and thus no need to return anything
@@ -273,7 +275,7 @@ struct wpe_renderer_host_interface android_renderer_host_impl = {
     },
     // create_client
     [] (void* data) -> int {
-        ALOGV("wpe_renderer_host_interface - create_client");
+        ALOGD("wpe_renderer_host_interface - create_client");
         return RendererHost::instance().createClient();
     },
 };

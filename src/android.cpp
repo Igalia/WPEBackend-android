@@ -9,7 +9,7 @@ extern "C" {
 __attribute__((visibility("default")))
 struct wpe_loader_interface _wpe_loader_interface = {
     [] (const char* object_name) -> void* {
-        ALOGV("_wpe_loader_interface queried for object_name %s", object_name);
+        ALOGD("_wpe_loader_interface queried for object_name %s", object_name);
 
         if (!std::strcmp(object_name, "_wpe_renderer_host_interface"))
             return &android_renderer_host_impl;
