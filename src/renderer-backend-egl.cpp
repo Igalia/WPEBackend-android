@@ -207,7 +207,7 @@ EGLTarget::~EGLTarget()
 
 void EGLTarget::initialize(RendererBackend* backend, uint32_t width, uint32_t height)
 {
-    ALOGV("EGLTarget::initialize() (%u,%u)", width, height);
+    ALOGD("EGLTarget::initialize() (%u,%u)", width, height);
     m_backend = backend;
     renderer.width = width;
     renderer.height = height;
@@ -392,7 +392,7 @@ void EGLTarget::frameRendered()
 
 void EGLTarget::deinitialize()
 {
-    ALOGV("EGLTarget::deinitialize()");
+    ALOGD("EGLTarget::deinitialize()");
     destroyBufferPool(buffers.pool, renderer.destroyImageKHR);
 
     if (renderer.framebuffer)
@@ -429,13 +429,13 @@ struct wpe_renderer_backend_egl_interface android_renderer_backend_egl_impl = {
     // create
     [] (int host_fd) -> void*
     {
-        ALOGV("android_renderer_backend_egl_impl::create()");
+        ALOGD("android_renderer_backend_egl_impl::create()");
         return new RendererBackend(host_fd);
     },
     // destroy
     [] (void* data)
     {
-        ALOGV("android_renderer_backend_egl_impl::destroy()");
+        ALOGD("android_renderer_backend_egl_impl::destroy()");
         auto* backend = static_cast<RendererBackend*>(data);
         delete backend;
     },
@@ -457,13 +457,13 @@ struct wpe_renderer_backend_egl_target_interface android_renderer_backend_egl_ta
     // create
     [] (struct wpe_renderer_backend_egl_target* target, int hostFd) -> void*
     {
-        ALOGV("android_renderer_backend_egl_target_impl::create() fd %d", hostFd);
+        ALOGD("android_renderer_backend_egl_target_impl::create() fd %d", hostFd);
         return new EGLTarget(target, hostFd);
     },
     // destroy
     [] (void* data)
     {
-        ALOGV("android_renderer_backend_egl_target_impl::destroy()");
+        ALOGD("android_renderer_backend_egl_target_impl::destroy()");
         auto* target = static_cast<EGLTarget*>(data);
         delete target;
     },
@@ -501,7 +501,7 @@ struct wpe_renderer_backend_egl_target_interface android_renderer_backend_egl_ta
     // deinitialize
     [] (void* data)
     {
-        ALOGV("android_renderer_backend_egl_target_impl::deinitialize()");
+        ALOGD("android_renderer_backend_egl_target_impl::deinitialize()");
         static_cast<EGLTarget*>(data)->deinitialize();
     },
 };

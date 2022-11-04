@@ -84,7 +84,7 @@ void ViewBackend::handleMessage(char* data, size_t size)
         break;
     }
     default:
-        ALOGV("ViewBackend: invalid message");
+        ALOGE("ViewBackend: invalid message");
         break;
     }
 }
@@ -102,22 +102,21 @@ struct wpe_view_backend_interface android_view_backend_exportable_impl = {
     // create
     [] (void* data, struct wpe_view_backend* backend) -> void*
     {
-        ALOGV("android_view_backend_exportable_impl::create()");
+        ALOGD("android_view_backend_exportable_impl::create()");
         auto* clientBundle = static_cast<Exportable::ClientBundle*>(data);
         return new Exportable::ViewBackend(clientBundle, backend);
     },
     // destroy
     [] (void* data)
     {
-        ALOGV("android_view_backend_exportable_impl::destroy()");
+        ALOGD("android_view_backend_exportable_impl::destroy()");
         auto* backend = static_cast<Exportable::ViewBackend*>(data);
         delete backend;
-        ALOGV("android_view_backend_exportable_impl::destroy() - done");
     },
     // initialize
     [] (void* data)
     {
-        ALOGV("android_view_backend_exportable_impl::initialize()");
+        ALOGD("android_view_backend_exportable_impl::initialize()");
         auto& backend = *static_cast<Exportable::ViewBackend*>(data);
         backend.initialize();
     },
@@ -147,7 +146,7 @@ __attribute__((visibility("default")))
 void
 wpe_android_view_backend_exportable_destroy(struct wpe_android_view_backend_exportable* exportable)
 {
-    ALOGV("wpe_android_view_backend_exportable_destroy");
+    ALOGD("wpe_android_view_backend_exportable_destroy");
     wpe_view_backend_destroy(exportable->backend);
     delete exportable->clientBundle;
     delete exportable;
