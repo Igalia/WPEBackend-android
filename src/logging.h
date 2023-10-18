@@ -12,7 +12,7 @@
 
 
 #ifndef LOG_TAG
-#define LOG_TAG "wpebackend-android"
+#define LOG_TAG "WPEBackend-android"
 #endif
 
 // Strip ALOGV from release builds.

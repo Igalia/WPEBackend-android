@@ -11,7 +11,7 @@ pkg_check_modules(WPE wpe-1.0 REQUIRED)
 find_package(GLIB 2.40.0 REQUIRED COMPONENTS gio gobject gthread gmodule)
 
 set(WPE_ANDROID_PUBLIC_HDRS
-    "include/wpe-android/view-backend-exportable.h"
+    "include/wpe-android/view-backend.h"
 )
 
 set(WPE_ANDROID_INCLUDE_DIRECTORIES
@@ -34,11 +34,10 @@ set(WPE_ANDROID_LIBRARIES
 
 set(WPE_ANDROID_SOURCES
     src/android.cpp
-    src/hacks.cpp
     src/ipc.cpp
     src/renderer-backend-egl.cpp
     src/renderer-host.cpp
-    src/view-backend-exportable.cpp
+    src/view-backend.cpp
 )
 
 add_library(WPEBackend-android SHARED ${WPE_ANDROID_SOURCES})

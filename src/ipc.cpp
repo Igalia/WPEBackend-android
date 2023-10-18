@@ -31,6 +31,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "logging.h"
+
 namespace IPC {
 
 Host::Host() = default;
@@ -91,6 +93,37 @@ int Host::releaseClientFD(bool closeSourceFd)
 void Host::sendMessage(char* data, size_t size)
 {
     g_socket_send(m_socket, data, size, nullptr, nullptr);
+}
+
+int Host::receiveFileDescriptor()
+{
+    struct msghdr msg = {0};
+
+    char m_buffer[1];
+    struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+
+    char c_buffer[256];
+    msg.msg_control = c_buffer;
+    msg.msg_controllen = sizeof(c_buffer);
+
+    int result;
+    do {
+        result = recvmsg(socketFd(), &msg, 0);
+    } while (result == -1 && errno == EINTR);
+    if (result == -1) {
+        result = errno;
+        ALOGV("Error reading ile descriptor from socket: error %#x (%s)",
+                result, strerror(result));
+        return -result;
+    }
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    int fd;
+    memmove(&fd, CMSG_DATA(cmsg), sizeof(fd));
+
+    return fd;
 }
 
 gboolean Host::socketCallback(GSocket* socket, GIOCondition condition, gpointer data)
@@ -181,7 +214,7 @@ void Client::sendMessage(char* data, size_t size)
     g_socket_send(m_socket, data, size, nullptr, nullptr);
 }
 
-void Client::sendReceiveMessage(char* data, size_t size, std::function<void(char*, size_t)> handler)
+void Client::sendAndReceiveMessage(char* data, size_t size, std::function<void(char*, size_t)> handler)
 {
     g_socket_send(m_socket, data, size, nullptr, nullptr);
 
@@ -192,6 +225,41 @@ void Client::sendReceiveMessage(char* data, size_t size, std::function<void(char
         handler(buffer, Message::size);
 
     g_free(buffer);
+}
+
+int Client::sendFileDescriptor(int fd)
+{
+    struct msghdr msg = { 0 };
+    char buf[CMSG_SPACE(sizeof(fd))];
+    memset(buf, '\0', sizeof(buf));
+
+    struct iovec io = { .iov_base = (char*)"", .iov_len = 1 };
+
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = buf;
+    msg.msg_controllen = sizeof(buf);
+
+    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+
+    memmove(CMSG_DATA(cmsg), &fd, sizeof(fd));
+
+    msg.msg_controllen = CMSG_SPACE(sizeof(fd));
+
+    int result;
+    do {
+        result = sendmsg(socketFd(), &msg, 0);
+    } while (result == -1 && errno == EINTR);
+    if (result == -1) {
+        result = errno;
+        ALOGV("Error writing file descriptor to socket: error %#x (%s)",
+                result, strerror(result));
+        return -result;
+    }
+    return NO_ERROR;
 }
 
 } // namespace IPC

@@ -1,15 +1,18 @@
-#include "renderer-host.h"
+#include "renderer-host-private.h"
 
-#include "interfaces.h"
-
+#include <android/hardware_buffer.h>
 #include <cstdint>
 #include <memory>
 #include <unistd.h>
+#include <wpe-android/view-backend.h>
 
+#include "interfaces.h"
 #include "ipc.h"
-#include "ipc-android.h"
+#include "ipc-messages.h"
 #include "logging.h"
+#include "view-backend-private.h"
 
+namespace WPEAndroid {
 
 uint32_t m_lastExportedPoolID = 0;
 
@@ -27,7 +30,7 @@ private:
     void constructPool();
     void purgePool(uint32_t poolId);
     void bufferAllocation(AHardwareBuffer* buffer, uint32_t, uint32_t);
-    void bufferCommit(uint32_t, uint32_t);
+    void bufferCommit(uint32_t, uint32_t, int);
 
     // IPC::Host::Handle
     void handleMessage(char*, size_t) override;
@@ -37,11 +40,33 @@ private:
     IPC::Host m_ipcHost;
 };
 
+// Buffer
+
+Buffer::Buffer(AHardwareBuffer* hardwareBuffer, uint32_t poolID, uint32_t bufferID) {
+    // Buffer has been received from socket and ref count has been increased
+    // by AHardwareBuffer_recvHandleFromUnixSocket
+    m_hardwareBuffer = hardwareBuffer;
+    m_poolID = poolID;
+    m_bufferID = bufferID;
+    m_locked = false;
+    m_pendingDelete = false;
+}
+
+Buffer::~Buffer() {
+    AHardwareBuffer_release(m_hardwareBuffer);
+}
+
 // BufferPool
 
 BufferPool::BufferPool(uint32_t id, RendererHostClientProxy* client)
     : m_id(id), m_client(client) {
     m_buffers = { nullptr, nullptr, nullptr, nullptr };
+}
+
+Buffer* BufferPool::releaseBuffer(int bufferId) {
+    auto* buffer = m_buffers[bufferId];
+    m_buffers[bufferId] = nullptr;
+    return buffer;
 }
 
 // RendereHost
@@ -80,7 +105,7 @@ BufferPool* RendererHost::findBufferPool(uint32_t poolID) {
     return it->second;
 }
 
-void RendererHost::registerViewBackend(uint32_t poolId, Exportable::ViewBackend* viewBackend) {
+void RendererHost::registerViewBackend(uint32_t poolId, ViewBackend* viewBackend) {
     m_viewBackendMap.insert({ poolId, viewBackend });
 }
 
@@ -91,7 +116,7 @@ void RendererHost::unregisterViewBackend(uint32_t poolId) {
     }
 }
 
-Exportable::ViewBackend* RendererHost::findViewBackend(uint32_t poolId) {
+ViewBackend* RendererHost::findViewBackend(uint32_t poolId) {
     auto it = m_viewBackendMap.find(poolId);
     if (it == m_viewBackendMap.end()) {
         ALOGW("RendererHost::findViewBackend(): " "Cannot find view backend with poolId %" PRIu32 " in render host.", poolId);
@@ -100,12 +125,19 @@ Exportable::ViewBackend* RendererHost::findViewBackend(uint32_t poolId) {
     return it->second;
 }
 
-void RendererHost::releaseBuffer(AHardwareBuffer* buffer, uint32_t poolID, uint32_t bufferID) {
-    auto* bufferPool = findBufferPool(poolID);
+void RendererHost::releaseBuffer(Buffer* buffer) {
+    buffer->setLocked(false);
+
+    if (buffer->pendingDelete()) {
+        delete buffer;
+        return;
+    }
+
+    auto* bufferPool = findBufferPool(buffer->poolID());
 
     IPC::ReleaseBuffer release;
-    release.poolID = poolID;
-    release.bufferID = bufferID;
+    release.poolID = buffer->poolID();
+    release.bufferID = buffer->bufferID();
 
     IPC::Message message;
     IPC::ReleaseBuffer::construct(message, release);
@@ -155,28 +187,36 @@ void RendererHostClientProxy::purgePool(uint32_t poolId) {
 
     for(int i=0; i<bufferPool->size(); i++) {
         auto* buffer = bufferPool->getBuffer(i);
-        if (buffer)
-            AHardwareBuffer_release(buffer);
-        bufferPool->setBuffer(i, nullptr);
+        if (buffer) {
+            if (buffer->locked()) {
+                buffer->setSPendingDelete(true);
+            } else {
+                delete buffer;
+            }
+            bufferPool->setBuffer(i, nullptr);
+        }
     }
 }
 
-void RendererHostClientProxy::bufferAllocation(AHardwareBuffer* buffer, uint32_t poolID, uint32_t bufferID)
+void RendererHostClientProxy::bufferAllocation(AHardwareBuffer* hardwareBuffer, uint32_t poolID, uint32_t bufferID)
 {
     auto* bufferPool = m_host.findBufferPool(poolID);
 
     if (bufferID >= bufferPool->size()) {
-        if (buffer)
-            AHardwareBuffer_release(buffer);
+        if (hardwareBuffer)
+            AHardwareBuffer_release(hardwareBuffer);
         return;
     }
 
-    if (bufferPool->getBuffer(bufferID))
-        AHardwareBuffer_release(bufferPool->getBuffer(bufferID));
+    auto* oldBuffer = bufferPool->releaseBuffer(bufferID);
+    if (oldBuffer)
+        delete oldBuffer;
+
+    auto* buffer = new Buffer(hardwareBuffer, poolID, bufferID);
     bufferPool->setBuffer(bufferID, buffer);
 }
 
-void RendererHostClientProxy::bufferCommit(uint32_t poolID, uint32_t bufferID)
+void RendererHostClientProxy::bufferCommit(uint32_t poolID, uint32_t bufferID, int fenceFD)
 {
     auto* bufferPool = m_host.findBufferPool(poolID);
 
@@ -184,7 +224,6 @@ void RendererHostClientProxy::bufferCommit(uint32_t poolID, uint32_t bufferID)
         return;
 
     auto* buffer = bufferPool->getBuffer(bufferID);
-    ALOGV(" RendererHostClientProxy::bufferCommit: committing pool buffer %p\n", buffer);
 
     // TODO: This is only temprorary solution for PSON support. To make this work correctly
     // interface change is needed where we received pool id from frame complete callback.
@@ -192,9 +231,11 @@ void RendererHostClientProxy::bufferCommit(uint32_t poolID, uint32_t bufferID)
 
     auto* viewBackend = m_host.findViewBackend(poolID);
     if (viewBackend) {
-        auto* clientBundle = viewBackend->clientBundle();
-        if (clientBundle->client && clientBundle->client->export_buffer)
-            clientBundle->client->export_buffer(clientBundle->data, buffer, poolID, bufferID);
+        auto* androidBackend = viewBackend->androidBackend();
+        if (androidBackend) {
+            buffer->setLocked(true);
+            androidBackend->commitBuffer(buffer, fenceFD);
+        }
     } else {
         // In some cases viewbackend might have been already destroyed when buffer commit message
         // is dispatched from ipc queue. It means that webview is already destroyed or being destroyed
@@ -202,8 +243,7 @@ void RendererHostClientProxy::bufferCommit(uint32_t poolID, uint32_t bufferID)
         //
         // In such case all we can do is to release the buffer
         if (buffer) {
-            AHardwareBuffer_release(buffer);
-            bufferPool->setBuffer(bufferID, nullptr);
+            delete bufferPool->releaseBuffer(bufferID);
         }
     }
 }
@@ -250,7 +290,13 @@ void RendererHostClientProxy::handleMessage(char*data, size_t size) {
     {
         auto commit = IPC::BufferCommit::from(message);
         ALOGV("  BufferCommit: poolID %u, bufferID %u", commit.poolID, commit.bufferID);
-        bufferCommit(commit.poolID, commit.bufferID);
+        int fenceFD = -1;
+        while (true) {
+            fenceFD = m_ipcHost.receiveFileDescriptor();
+            if (!fenceFD || fenceFD != -EAGAIN)
+                break;
+        }
+        bufferCommit(commit.poolID, commit.bufferID, fenceFD);
         break;
     }
     default:
@@ -258,6 +304,8 @@ void RendererHostClientProxy::handleMessage(char*data, size_t size) {
         break;
     }
 }
+
+} // namespace WPEAndroid
 
 struct wpe_renderer_host_interface android_renderer_host_impl = {
     // create
@@ -276,6 +324,6 @@ struct wpe_renderer_host_interface android_renderer_host_impl = {
     // create_client
     [] (void* data) -> int {
         ALOGD("wpe_renderer_host_interface - create_client");
-        return RendererHost::instance().createClient();
+        return WPEAndroid::RendererHost::instance().createClient();
     },
 };

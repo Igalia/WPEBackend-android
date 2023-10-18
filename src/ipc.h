@@ -24,13 +24,15 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef wpe_mesa_ipc_h
-#define wpe_mesa_ipc_h
+#pragma once
 
 #include <functional>
 #include <gio/gio.h>
 #include <memory>
 #include <stdint.h>
+#include <unistd.h>
+
+#define NO_ERROR 0L
 
 namespace IPC {
 
@@ -62,6 +64,7 @@ public:
     int releaseClientFD(bool closeSourceFd = false);
 
     void sendMessage(char*, size_t);
+    int receiveFileDescriptor();
 
 private:
     static gboolean socketCallback(GSocket*, GIOCondition, gpointer);
@@ -88,7 +91,8 @@ public:
     int socketFd();
 
     void sendMessage(char*, size_t);
-    void sendReceiveMessage(char*, size_t, std::function<void(char*, size_t)> handler);
+    void sendAndReceiveMessage(char*, size_t, std::function<void(char*, size_t)> handler);
+    int sendFileDescriptor(int fd);
 
 private:
     static gboolean socketCallback(GSocket*, GIOCondition, gpointer);
@@ -100,5 +104,3 @@ private:
 };
 
 } // namespace IPC
-
-#endif // wpe_mesa_ipc_h

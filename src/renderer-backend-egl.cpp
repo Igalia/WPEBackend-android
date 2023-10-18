@@ -1,10 +1,6 @@
 #include "interfaces.h"
 
-#include "ipc.h"
-#include "ipc-android.h"
-#include "logging.h"
 #include <array>
-
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -13,6 +9,11 @@
 #include <cstdint>
 #include <errno.h>
 #include <unordered_map>
+
+
+#include "ipc.h"
+#include "ipc-messages.h"
+#include "logging.h"
 
 struct Buffer {
     uint32_t bufferID { 0 };
@@ -85,6 +86,9 @@ public:
         PFNEGLCREATEIMAGEKHRPROC createImageKHR;
         PFNEGLDESTROYIMAGEKHRPROC destroyImageKHR;
         PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC imageTargetRenderbufferStorageOES;
+        PFNEGLCREATESYNCKHRPROC createSyncKHR;
+        PFNEGLDESTROYSYNCKHRPROC destroySyncKHR;
+        PFNEGLDUPNATIVEFENCEFDANDROIDPROC dupNativeFenceFDANDROID;
 
         GLuint framebuffer { 0 };
     } renderer;
@@ -219,7 +223,7 @@ void EGLTarget::initialize(RendererBackend* backend, uint32_t width, uint32_t he
 
     // We can safely assume that returned message is PoolConstructionReply because there are no
     // other messages coming this way in this socket at this point
-    backend->ipc().sendReceiveMessage(IPC::Message::data(message), IPC::Message::size, [&] (char* data, size_t size) {
+    backend->ipc().sendAndReceiveMessage(IPC::Message::data(message), IPC::Message::size, [&] (char* data, size_t size) {
         ALOGV("EGLTarget::initialize - handleMessage() %p[%zu]", data, size);
         if (size != IPC::Message::size)
             return;
@@ -261,12 +265,11 @@ void EGLTarget::resize(uint32_t width, uint32_t height)
 
     IPC::Message message;
     IPC::PoolPurge::construct(message, poolPurge);
-    ipcClient.sendMessage(IPC::Message::data(message), IPC::Message::size);
+    m_backend->ipc().sendMessage(IPC::Message::data(message), IPC::Message::size);
 }
 
 void EGLTarget::frameWillRender()
 {
-    ALOGV("EGLTarget::frameWillRender(), renderer.initialized %d", renderer.initialized);
     if (!renderer.initialized) {
         renderer.initialized = true;
 
@@ -278,6 +281,12 @@ void EGLTarget::frameWillRender()
             eglGetProcAddress("eglDestroyImageKHR"));
         renderer.imageTargetRenderbufferStorageOES = reinterpret_cast<PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC>(
             eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES"));
+        renderer.createSyncKHR = reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(
+            eglGetProcAddress("eglCreateSyncKHR"));
+        renderer.destroySyncKHR = reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(
+            eglGetProcAddress("eglDestroySyncKHR"));
+        renderer.dupNativeFenceFDANDROID = reinterpret_cast<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(
+            eglGetProcAddress("eglDupNativeFenceFDANDROID"));
 
         GLuint framebuffer { 0 };
         glGenFramebuffers(1, &framebuffer);
@@ -287,10 +296,6 @@ void EGLTarget::frameWillRender()
             renderer.getNativeClientBufferANDROID, renderer.createImageKHR, renderer.destroyImageKHR, renderer.imageTargetRenderbufferStorageOES,
             renderer.framebuffer);
     }
-
-    ALOGV("EGLTarget::frameWillRender(), buffers.current %p", buffers.current);
-    for (auto& buffer : buffers.pool)
-        ALOGV("  buffer: id %u, locked %d object %p", buffer.bufferID, buffer.locked, buffer.object);
 
     for (auto& buffer : buffers.pool) {
         if (buffer.locked)
@@ -303,8 +308,7 @@ void EGLTarget::frameWillRender()
         ALOGV("  no available current-buffer found");
         std::abort();
         return;
-    } else
-        ALOGV("  found current buffer %p at array[%zu]", buffers.current, std::distance(buffers.pool.begin(), buffers.current));
+    }
 
     auto& current = *buffers.current;
 
@@ -327,8 +331,6 @@ void EGLTarget::frameWillRender()
         current.egl.image = renderer.createImageKHR(eglGetCurrentDisplay(),
             EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, clientBuffer, nullptr);
 
-        ALOGV("  spawned EGL state: clientBuffer %p, EGLImageKHR %p, egl err %x", clientBuffer, current.egl.image, eglGetError());
-
         std::array<GLuint, 2> renderbuffers { 0, 0 };
         glGenRenderbuffers(2, renderbuffers.data());
         current.gl.colorBuffer = renderbuffers[0];
@@ -339,8 +341,6 @@ void EGLTarget::frameWillRender()
 
         glBindRenderbuffer(GL_RENDERBUFFER, current.gl.dsBuffer);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8_OES, renderer.width, renderer.height);
-
-        ALOGV("  spawned GL state: colorBuffer %u dsBuffer %u, gl err %x", current.gl.colorBuffer, current.gl.dsBuffer, glGetError());
 
         {
             IPC::BufferAllocation allocation;
@@ -370,13 +370,23 @@ void EGLTarget::frameWillRender()
 
 void EGLTarget::frameRendered()
 {
+    EGLSyncKHR sync = renderer.createSyncKHR(eglGetCurrentDisplay(), EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
+
     glFlush();
 
-    ALOGV("EGLTarget::frameRendered(), buffers.current %p, errors: %x/%x",
-        buffers.current, eglGetError(), glGetError());
-    if (buffers.current->object) {
-        ALOGV("  committing object %p", buffers.current->object);
+    int syncFd = -1;
+    if (sync != EGL_NO_SYNC_KHR) {
+        // native fence fd will not be populated until flush() is done
+        syncFd = renderer.dupNativeFenceFDANDROID(eglGetCurrentDisplay(), sync);
+        if (syncFd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+            ALOGV("EGLTarget: EGL_NO_NATIVE_FENCE_FD_ANDROID");
+        }
+        renderer.destroySyncKHR(eglGetCurrentDisplay(), sync);
+    } else {
+        ALOGV("EGLTarget: EGL_NO_SYNC_KHR");
+    }
 
+    if (buffers.current->object) {
         IPC::BufferCommit commit;
         commit.poolID = buffers.poolID;
         commit.bufferID = buffers.current->bufferID;
@@ -384,6 +394,7 @@ void EGLTarget::frameRendered()
         IPC::Message message;
         IPC::BufferCommit::construct(message, commit);
         m_backend->ipc().sendMessage(IPC::Message::data(message), IPC::Message::size);
+        m_backend->ipc().sendFileDescriptor(syncFd);
     }
 
     buffers.current->locked = true;
@@ -402,16 +413,9 @@ void EGLTarget::deinitialize()
 
 void EGLTarget::releaseBuffer(uint32_t poolID, uint32_t bufferID)
 {
-    ALOGV("EGLTarget::releaseBuffer() poolID %u, bufferID %u", poolID, bufferID);
-
     if (buffers.poolID != poolID)
         return;
 
-    for (auto& buffer : buffers.pool) {
-        ALOGV("  buffers.pool[%zu]: id %u, locked %d, object %p",
-            std::distance(buffers.pool.begin(), &buffer),
-            buffer.bufferID, buffer.locked, buffer.object);
-    }
     for (auto& buffer : buffers.pool) {
         if (buffer.bufferID == bufferID) {
             buffer.locked = false;
@@ -489,13 +493,11 @@ struct wpe_renderer_backend_egl_target_interface android_renderer_backend_egl_ta
     // frame_will_render
     [] (void* data)
     {
-        ALOGV("android_renderer_backend_egl_target_impl::frame_will_render()");
         static_cast<EGLTarget*>(data)->frameWillRender();
     },
     // frame_rendered
     [] (void* data)
     {
-        ALOGV("android_renderer_backend_egl_target_impl::frame_rendered()");
         static_cast<EGLTarget*>(data)->frameRendered();
     },
     // deinitialize
