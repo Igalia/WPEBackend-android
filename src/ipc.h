@@ -69,10 +69,10 @@ public:
 private:
     static gboolean socketCallback(GSocket*, GIOCondition, gpointer);
 
-    Handler* m_handler;
+    Handler* m_handler { nullptr };
 
-    GSocket* m_socket;
-    GSource* m_source;
+    GSocket* m_socket { nullptr };
+    GSource* m_source { nullptr };
     int m_clientFd { -1 };
 };
 
@@ -97,10 +97,10 @@ public:
 private:
     static gboolean socketCallback(GSocket*, GIOCondition, gpointer);
 
-    Handler* m_handler;
+    Handler* m_handler { nullptr };
 
-    GSocket* m_socket;
-    GSource* m_source;
+    GSocket* m_socket { nullptr };
+    GSource* m_source { nullptr };
 };
 
 } // namespace IPC

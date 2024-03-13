@@ -65,10 +65,13 @@ void Host::deinitialize()
     if (m_clientFd != -1)
         close(m_clientFd);
 
-    if (m_source)
+    if (m_source) {
         g_source_destroy(m_source);
+        g_source_unref(m_source);
+    }
+
     if (m_socket)
-        g_object_unref(m_socket);
+        g_clear_object(&m_socket);
 
     m_handler = nullptr;
 }
@@ -171,7 +174,7 @@ void Client::deinitialize()
 {
     if (m_source) {
         g_source_destroy(m_source);
-        g_object_unref(m_source);
+        g_source_unref(m_source);
     }
 
     g_clear_object(&m_socket);
